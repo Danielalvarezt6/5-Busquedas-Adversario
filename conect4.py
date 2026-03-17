@@ -102,7 +102,7 @@ class InterfaceConecta4(js.JuegoInterface):
             jugada = int(input("Jugada: "))
         return jugada
 
-def ordena_centro(jugadas, jugador):
+def ordena_centro(jugadas, jugador, s=None):
     """
     Ordena las jugadas de acuerdo a la distancia al centro
     """
@@ -150,6 +150,143 @@ def evalua_3con(s):
         raise ValueError("Evaluación fuera de rango --> ", promedio)
     return promedio
 
+# ---------------------------------------------------------------------------
+# Precomputo de todas las líneas de 4 celdas posibles en el tablero 6×7
+# ---------------------------------------------------------------------------
+_VENTANAS = []
+_VTIPO = []   # 'h', 'v' o 'd' (diagonal)
+for _r in range(6):
+    for _c in range(4):
+        _VENTANAS.append(tuple(_r * 7 + _c + k for k in range(4)))
+        _VTIPO.append('h')
+for _c in range(7):
+    for _r in range(3):
+        _VENTANAS.append(tuple((_r + k) * 7 + _c for k in range(4)))
+        _VTIPO.append('v')
+for _r in range(3):
+    for _c in range(4):
+        _VENTANAS.append(tuple((_r + k) * 7 + _c + k for k in range(4)))
+        _VTIPO.append('d')
+for _r in range(3):
+    for _c in range(3, 7):
+        _VENTANAS.append(tuple((_r + k) * 7 + _c - k for k in range(4)))
+        _VTIPO.append('d')
+
+_VENTANAS_DE = {i: [] for i in range(42)}
+for _idx, _v in enumerate(_VENTANAS):
+    for _celda in _v:
+        _VENTANAS_DE[_celda].append(_idx)
+
+_PESO_COL = (0, 0.5, 1.0, 1.5, 1.0, 0.5, 0)
+
+
+def _fila_caida(s, col):
+    for i in range(5, -1, -1):
+        if s[col + 7 * i] == 0:
+            return i
+    return -1
+
+
+def evalua_ventanas(s):
+    """
+    Evaluación por dominancia territorial:
+      - Pesos exponenciales por piezas alineadas en una ventana libre
+      - Prima ×1.3 para alineaciones diagonales (más difíciles de defender)
+      - Multiplicador de inmediatez: si la celda que completa la línea
+        es jugable AHORA (tiene soporte), la amenaza vale mucho más
+      - Bonus posicional por fichas en columnas centrales
+    """
+    score = 0.0
+    pesos = (0, 1, 8, 80)
+
+    for ventana, tipo in zip(_VENTANAS, _VTIPO):
+        c0, c1, c2, c3 = (
+            s[ventana[0]], s[ventana[1]], s[ventana[2]], s[ventana[3]]
+        )
+        p1 = (c0 == 1) + (c1 == 1) + (c2 == 1) + (c3 == 1)
+        p2 = (c0 == -1) + (c1 == -1) + (c2 == -1) + (c3 == -1)
+
+        if (p1 and p2) or not (p1 or p2):
+            continue
+
+        piezas, signo = (p1, 1) if p1 else (p2, -1)
+        mult = 1.3 if tipo == 'd' else 1.0
+
+        if piezas >= 2:
+            for i in ventana:
+                if s[i] == 0:
+                    fila = i // 7
+                    if fila == 5 or s[i + 7] != 0:
+                        mult *= 2.5 if piezas == 3 else 1.4
+                        break
+
+        score += signo * pesos[piezas] * mult
+
+    for i in range(42):
+        if s[i]:
+            score += s[i] * _PESO_COL[i % 7]
+
+    return max(-0.999, min(0.999, score / 3500))
+
+
+def ordena_consecuencias(jugadas, jugador, s):
+    """
+    Ordenamiento por análisis de consecuencias:
+      1. Victoria inmediata  →  prioridad máxima
+      2. Bloqueo de victoria rival  →  segunda prioridad
+      3. Creación de amenaza propia (3 en línea libre)
+      4. Bloqueo de amenaza rival
+      5. Detección de trampa: si colocar aquí le regala al rival
+         una celda ganadora justo arriba  →  penalización fuerte
+      6. Centralidad como desempate
+    """
+    def _score(col):
+        fila = _fila_caida(s, col)
+        if fila < 0:
+            return -10000
+        pos = col + 7 * fila
+        pts = 0.0
+
+        s_sim = list(s)
+        s_sim[pos] = jugador
+        for vi in _VENTANAS_DE[pos]:
+            v = _VENTANAS[vi]
+            propias = sum(1 for i in v if s_sim[i] == jugador)
+            rivales = sum(1 for i in v if s_sim[i] == -jugador)
+            if rivales == 0:
+                if propias == 4:
+                    return 10000
+                if propias == 3:
+                    pts += 40
+
+        s_sim[pos] = -jugador
+        for vi in _VENTANAS_DE[pos]:
+            v = _VENTANAS[vi]
+            rivales = sum(1 for i in v if s_sim[i] == -jugador)
+            propias = sum(1 for i in v if s_sim[i] == jugador)
+            if propias == 0:
+                if rivales == 4:
+                    pts += 5000
+                elif rivales == 3:
+                    pts += 25
+
+        if fila > 0:
+            pos_arriba = col + 7 * (fila - 1)
+            s_tr = list(s)
+            s_tr[pos] = jugador
+            s_tr[pos_arriba] = -jugador
+            for vi in _VENTANAS_DE[pos_arriba]:
+                v = _VENTANAS[vi]
+                if all(s_tr[i] == -jugador for i in v):
+                    pts -= 3000
+                    break
+
+        pts += (3 - abs(col - 3)) * 0.5
+        return pts
+
+    return sorted(jugadas, key=_score, reverse=True)
+
+
 if __name__ == '__main__':
 
     cfg = {
@@ -157,8 +294,8 @@ if __name__ == '__main__':
         "Jugador 2": "Aleatorio",   #Puede ser "Humano", "Aleatorio", "Negamax", "Tiempo"
         "profundidad máxima": 5,
         "tiempo": 10,
-        "ordena": ordena_centro,    #Puede ser None o una función f(jugadas, j) -> lista de jugadas ordenada
-        "evalua": evalua_3con       #Puede ser None o una función f(estado) -> número entre -1 y 1
+        "ordena": ordena_consecuencias, #Puede ser None o una función f(jugadas, j, s) -> lista de jugadas ordenada
+        "evalua": evalua_ventanas      #Puede ser None o una función f(estado) -> número entre -1 y 1
     }
 
     def jugador_cfg(cadena):
@@ -171,7 +308,7 @@ if __name__ == '__main__':
                 ordena=cfg["ordena"], d=cfg["profundidad máxima"], evalua=cfg["evalua"]
             )
         elif cadena == "Tiempo":
-            return minimax.JugadorNegamaxIterativo(
+            return minimax.JugadorMinimaxIterativo(
                 tiempo=cfg["tiempo"], ordena=cfg["ordena"], evalua=cfg["evalua"]
             )
         else:
