@@ -76,11 +76,17 @@ class InterfaceConecta4(js.JuegoInterface):
         para mostrar el estado de forma más amigable
 
         """
-        a = [' X ' if x == 1 else ' O ' if x == -1 else '   ' for x in s]
-        print('\n 0 | 1 | 2 | 3 | 4 | 5 | 6')
-        for i in range(6):
-            print('|'.join(a[7 * i:7 * (i + 1)]))
-            print('---+---+---+---+---+---+---\n')
+        simbolos = {1: ' X ', -1: ' O ', 0: '   '}
+        print()
+        print('      0   1   2   3   4   5   6   ')
+        print('    ┌───┬───┬───┬───┬───┬───┬───┐')
+        for fila in range(6):
+            cuadritos = '│'.join(simbolos[s[fila * 7 + c]] for c in range(7))
+            print(f'    │{cuadritos}│')
+            if fila < 5:
+                print('    ├───┼───┼───┼───┼───┼───┼───┤')
+        print('    └───┴───┴───┴───┴───┴───┴───┘')
+        print()
     
     def muestra_ganador(self, g):
         """
@@ -150,149 +156,182 @@ def evalua_3con(s):
         raise ValueError("Evaluación fuera de rango --> ", promedio)
     return promedio
 
-# ---------------------------------------------------------------------------
-# Precomputo de todas las líneas de 4 celdas posibles en el tablero 6×7
-# ---------------------------------------------------------------------------
-_VENTANAS = []
-_VTIPO = []   # 'h', 'v' o 'd' (diagonal)
-for _r in range(6):
-    for _c in range(4):
-        _VENTANAS.append(tuple(_r * 7 + _c + k for k in range(4)))
-        _VTIPO.append('h')
-for _c in range(7):
-    for _r in range(3):
-        _VENTANAS.append(tuple((_r + k) * 7 + _c for k in range(4)))
-        _VTIPO.append('v')
-for _r in range(3):
-    for _c in range(4):
-        _VENTANAS.append(tuple((_r + k) * 7 + _c + k for k in range(4)))
-        _VTIPO.append('d')
-for _r in range(3):
-    for _c in range(3, 7):
-        _VENTANAS.append(tuple((_r + k) * 7 + _c - k for k in range(4)))
-        _VTIPO.append('d')
+# Todas las ternas de 4 en línea (horizontales, verticales, diagonales).
+LINEAS_GANADORAS = []
+TIPO_LINEA = []
 
-_VENTANAS_DE = {i: [] for i in range(42)}
-for _idx, _v in enumerate(_VENTANAS):
-    for _celda in _v:
-        _VENTANAS_DE[_celda].append(_idx)
+#líneas horizontales
+for fila in range(6):
+    for col in range(4):
+        linea = tuple(fila * 7 + col + k for k in range(4))
+        LINEAS_GANADORAS.append(linea)
+        TIPO_LINEA.append('horizontal')
 
-_PESO_COL = (0, 0.5, 1.0, 1.5, 1.0, 0.5, 0)
+#líneas verticales
+for col in range(7):
+    for fila in range(3):
+        linea = tuple((fila + k) * 7 + col for k in range(4))
+        LINEAS_GANADORAS.append(linea)
+        TIPO_LINEA.append('vertical')
 
+# diagonales (descendentes hacia la derecha)
+for fila in range(3):
+    for col in range(4):
+        linea = tuple((fila + k) * 7 + col + k for k in range(4))
+        LINEAS_GANADORAS.append(linea)
+        TIPO_LINEA.append('diagonal')
 
-def _fila_caida(s, col):
-    for i in range(5, -1, -1):
-        if s[col + 7 * i] == 0:
-            return i
-    return -1
+# diagonales (descendentes hacia la izquierda)
+for fila in range(3):
+    for col in range(3, 7):
+        linea = tuple((fila + k) * 7 + col - k for k in range(4))
+        LINEAS_GANADORAS.append(linea)
+        TIPO_LINEA.append('diagonal')
 
+# creamos un diccionario para saber rápido a qué líneas ganadoras pertenece cada cuadrito
+LINEAS_POR_CUADRITO = {i: [] for i in range(42)}
+for indice_linea, linea in enumerate(LINEAS_GANADORAS):
+    for cuadrito in linea:
+        LINEAS_POR_CUADRITO[cuadrito].append(indice_linea)
+
+PESO_COLUMNAS = (0, 0.5, 1.0, 1.5, 1.0, 0.5, 0)
+
+def obtener_fila_disponible(s, columna):
+    """
+    Fila más baja vacía en `columna` (índice de fila: 0 arriba, 5 abajo).
+
+    Devuelve:
+        int: fila donde cae la ficha, o -1 si la columna está llena.
+    """
+    for fila in range(5, -1, -1):
+        if s[columna + 7 * fila] == 0:
+            return fila
+    return -1 # La columna está llena
 
 def evalua_ventanas(s):
     """
-    Evaluación por dominancia territorial:
-      - Pesos exponenciales por piezas alineadas en una ventana libre
-      - Prima ×1.3 para alineaciones diagonales (más difíciles de defender)
-      - Multiplicador de inmediatez: si la celda que completa la línea
-        es jugable AHORA (tiene soporte), la amenaza vale mucho más
-      - Bonus posicional por fichas en columnas centrales
+    Evalúa qué tan bien posicionado está el tablero.
+    Suma puntos por tener fichas alineadas donde todavía hay espacio para conectar 4.
     """
-    score = 0.0
-    pesos = (0, 1, 8, 80)
+    puntuacion_total = 0.0
+    # puntos base: 0 fichas = 0pts, 1 ficha = 1pt, 2 fichas = 8pts, 3 fichas = 80pts
+    puntos_por_fichas = {0: 0, 1: 1, 2: 8, 3: 80, 4: 10000}
 
-    for ventana, tipo in zip(_VENTANAS, _VTIPO):
-        c0, c1, c2, c3 = (
-            s[ventana[0]], s[ventana[1]], s[ventana[2]], s[ventana[3]]
-        )
-        p1 = (c0 == 1) + (c1 == 1) + (c2 == 1) + (c3 == 1)
-        p2 = (c0 == -1) + (c1 == -1) + (c2 == -1) + (c3 == -1)
+    for linea, tipo in zip(LINEAS_GANADORAS, TIPO_LINEA):
+        # vemos que fichas hay en esta linea
+        valores_linea = [s[cuadrito] for cuadrito in linea]
+        fichas_j1 = valores_linea.count(1)
+        fichas_j2 = valores_linea.count(-1)
 
-        if (p1 and p2) or not (p1 or p2):
+        # si ambos jugadores tienen fichas aquí, la línea está bloqueada, no sirve a nadie
+        if fichas_j1 > 0 and fichas_j2 > 0:
+            continue
+        # si la línea está totalmente vacía, no aporta valor inmediato
+        if fichas_j1 == 0 and fichas_j2 == 0:
             continue
 
-        piezas, signo = (p1, 1) if p1 else (p2, -1)
-        mult = 1.3 if tipo == 'd' else 1.0
+        # determinamos de quién es la ventaja en esta línea
+        if fichas_j1 > 0:
+            fichas_alineadas = fichas_j1
+            signo = 1 # Beneficia al jugador 1
+        else:
+            fichas_alineadas = fichas_j2
+            signo = -1 # Beneficia al jugador 2 (resta puntuación general)
 
-        if piezas >= 2:
-            for i in ventana:
-                if s[i] == 0:
-                    fila = i // 7
-                    if fila == 5 or s[i + 7] != 0:
-                        mult *= 2.5 if piezas == 3 else 1.4
+        # las diagonales son más difíciles de ver y defender, valen un poco más
+        multiplicador = 1.3 if tipo == 'diagonal' else 1.0
+
+        # si ya hay al menos 2 fichas, checamos qué tan rápido se puede completar la línea
+        if fichas_alineadas >= 2:
+            for cuadrito in linea:
+                if s[cuadrito] == 0: # Encontramos la cuadrito que falta llenar
+                    fila_cuadrito = cuadrito // 7
+                    tiene_soporte = (fila_cuadrito == 5) or (s[cuadrito + 7] != 0)
+                    if tiene_soporte:
+                        multiplicador *= 2.5 if fichas_alineadas == 3 else 1.4
                         break
 
-        score += signo * pesos[piezas] * mult
+        puntuacion_total += signo * puntos_por_fichas[fichas_alineadas] * multiplicador
 
-    for i in range(42):
-        if s[i]:
-            score += s[i] * _PESO_COL[i % 7]
+    for cuadrito in range(42):
+        if s[cuadrito] != 0:
+            columna = cuadrito % 7
+            puntuacion_total += s[cuadrito] * PESO_COLUMNAS[columna]
 
-    return max(-0.999, min(0.999, score / 3500))
+    return max(-0.999, min(0.999, puntuacion_total / 3500))
 
 
 def ordena_consecuencias(jugadas, jugador, s):
     """
-    Ordenamiento por análisis de consecuencias:
-      1. Victoria inmediata  →  prioridad máxima
-      2. Bloqueo de victoria rival  →  segunda prioridad
-      3. Creación de amenaza propia (3 en línea libre)
-      4. Bloqueo de amenaza rival
-      5. Detección de trampa: si colocar aquí le regala al rival
-         una celda ganadora justo arriba  →  penalización fuerte
-      6. Centralidad como desempate
+    Ordena las jugadas disponibles priorizando las más urgentes o ventajosas:
+    1. Ganar.
+    2. Bloquear victoria del rival.
+    3. Armar ataques / Bloquear ataques.
+    4. No regalarle la victoria al rival arriba.
     """
-    def _score(col):
-        fila = _fila_caida(s, col)
+    rival = -jugador
+
+    def calificar_jugada(columna):
+        fila = obtener_fila_disponible(s, columna)
         if fila < 0:
             return -10000
-        pos = col + 7 * fila
-        pts = 0.0
 
-        s_sim = list(s)
-        s_sim[pos] = jugador
-        for vi in _VENTANAS_DE[pos]:
-            v = _VENTANAS[vi]
-            propias = sum(1 for i in v if s_sim[i] == jugador)
-            rivales = sum(1 for i in v if s_sim[i] == -jugador)
-            if rivales == 0:
-                if propias == 4:
+        cuadrito_destino = columna + 7 * fila
+        puntos_jugada = 0.0
+
+        simulacion_mia = list(s)
+        simulacion_mia[cuadrito_destino] = jugador
+
+        for indice_linea in LINEAS_POR_CUADRITO[cuadrito_destino]:
+            linea = LINEAS_GANADORAS[indice_linea]
+            valores_linea = [simulacion_mia[i] for i in linea]
+            mis_fichas = valores_linea.count(jugador)
+            fichas_rival = valores_linea.count(rival)
+
+            if fichas_rival == 0:
+                if mis_fichas == 4:
                     return 10000
-                if propias == 3:
-                    pts += 40
+                if mis_fichas == 3:
+                    puntos_jugada += 40
 
-        s_sim[pos] = -jugador
-        for vi in _VENTANAS_DE[pos]:
-            v = _VENTANAS[vi]
-            rivales = sum(1 for i in v if s_sim[i] == -jugador)
-            propias = sum(1 for i in v if s_sim[i] == jugador)
-            if propias == 0:
-                if rivales == 4:
-                    pts += 5000
-                elif rivales == 3:
-                    pts += 25
+        simulacion_rival = list(s)
+        simulacion_rival[cuadrito_destino] = rival
+
+        for indice_linea in LINEAS_POR_CUADRITO[cuadrito_destino]:
+            linea = LINEAS_GANADORAS[indice_linea]
+            valores_linea = [simulacion_rival[i] for i in linea]
+            mis_fichas = valores_linea.count(jugador)
+            fichas_rival = valores_linea.count(rival)
+
+            if mis_fichas == 0:
+                if fichas_rival == 4:
+                    puntos_jugada += 5000
+                elif fichas_rival == 3:
+                    puntos_jugada += 25
 
         if fila > 0:
-            pos_arriba = col + 7 * (fila - 1)
-            s_tr = list(s)
-            s_tr[pos] = jugador
-            s_tr[pos_arriba] = -jugador
-            for vi in _VENTANAS_DE[pos_arriba]:
-                v = _VENTANAS[vi]
-                if all(s_tr[i] == -jugador for i in v):
-                    pts -= 3000
+            cuadrito_arriba = columna + 7 * (fila - 1)
+            simulacion_trampa = list(s)
+            simulacion_trampa[cuadrito_destino] = jugador
+            simulacion_trampa[cuadrito_arriba] = rival
+
+            for indice_linea in LINEAS_POR_CUADRITO[cuadrito_arriba]:
+                linea = LINEAS_GANADORAS[indice_linea]
+                if all(simulacion_trampa[i] == rival for i in linea):
+                    puntos_jugada -= 3000
                     break
 
-        pts += (3 - abs(col - 3)) * 0.5
-        return pts
+        puntos_jugada += (3 - abs(columna - 3)) * 0.5
+        return puntos_jugada
 
-    return sorted(jugadas, key=_score, reverse=True)
-
+    return sorted(jugadas, key=calificar_jugada, reverse=True)
 
 if __name__ == '__main__':
 
     cfg = {
-        "Jugador 1": "Humano",      #Puede ser "Humano", "Aleatorio", "Negamax", "Tiempo"
-        "Jugador 2": "Aleatorio",   #Puede ser "Humano", "Aleatorio", "Negamax", "Tiempo"
-        "profundidad máxima": 5,
+        "Jugador 1": "Negamax",      #Puede ser "Humano", "Aleatorio", "Negamax", "Tiempo"
+        "Jugador 2": "Tiempo",   #Puede ser "Humano", "Aleatorio", "Negamax", "Tiempo"
+        "profundidad máxima": 6,
         "tiempo": 10,
         "ordena": ordena_consecuencias, #Puede ser None o una función f(jugadas, j, s) -> lista de jugadas ordenada
         "evalua": evalua_ventanas      #Puede ser None o una función f(estado) -> número entre -1 y 1
